@@ -5,7 +5,8 @@ import os
 import numpy as np
 import h5py
 
-file = 'data/fer2013.csv'
+file = '../../Datasets/FER2013/fer2013.csv'
+
 
 # Creat the list to store the data and label information
 Training_x = []
