@@ -16,6 +16,8 @@ import utils
 from fer import FER2013
 from torch.autograd import Variable
 from models import *
+from tqdm import tqdm
+from sklearn.metrics import confusion_matrix
 
 parser = argparse.ArgumentParser(description='PyTorch Fer2013 CNN Training')
 parser.add_argument('--model', type=str, default='VGG19', help='CNN architecture')
@@ -106,7 +108,8 @@ def train(epoch):
         current_lr = opt.lr
     print('learning_rate: %s' % str(current_lr))
 
-    for batch_idx, (inputs, targets) in enumerate(trainloader):
+    pbar = tqdm(trainloader, ncols=0)
+    for batch_idx, (inputs, targets) in enumerate(pbar):
         if use_cuda:
             inputs, targets = inputs.cuda(), targets.cuda()
         optimizer.zero_grad()
@@ -116,15 +119,17 @@ def train(epoch):
         loss.backward()
         utils.clip_gradient(optimizer, 0.1)
         optimizer.step()
-        train_loss += loss.data[0]
+        train_loss += loss.item()
         _, predicted = torch.max(outputs.data, 1)
         total += targets.size(0)
-        correct += predicted.eq(targets.data).cpu().sum()
+        correct += predicted.eq(targets.data).cpu().sum().item()
 
-        utils.progress_bar(batch_idx, len(trainloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
-            % (train_loss/(batch_idx+1), 100.*correct/total, correct, total))
+        description = 'Loss: %.3f | Acc: %.3f (%d/%d)'\
+                      % (train_loss/(batch_idx+1), 100.*correct/total, correct, total)
+        pbar.set_description(desc=description)
 
     Train_acc = 100.*correct/total
+
 
 def PublicTest(epoch):
     global PublicTest_acc
@@ -134,38 +139,38 @@ def PublicTest(epoch):
     PublicTest_loss = 0
     correct = 0
     total = 0
-    for batch_idx, (inputs, targets) in enumerate(PublicTestloader):
-        bs, ncrops, c, h, w = np.shape(inputs)
-        inputs = inputs.view(-1, c, h, w)
-        if use_cuda:
-            inputs, targets = inputs.cuda(), targets.cuda()
-        inputs, targets = Variable(inputs, volatile=True), Variable(targets)
-        outputs = net(inputs)
-        outputs_avg = outputs.view(bs, ncrops, -1).mean(1)  # avg over crops
-        loss = criterion(outputs_avg, targets)
-        PublicTest_loss += loss.data[0]
-        _, predicted = torch.max(outputs_avg.data, 1)
-        total += targets.size(0)
-        correct += predicted.eq(targets.data).cpu().sum()
-
-        utils.progress_bar(batch_idx, len(PublicTestloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
-                           % (PublicTest_loss / (batch_idx + 1), 100. * correct / total, correct, total))
-
-    # Save checkpoint.
+    predicted_labels, labels = None, None
+    pbar = tqdm(PublicTestloader, ncols=0)
+    with torch.no_grad():
+        for batch_idx, (inputs, targets) in enumerate(pbar):
+            bs, ncrops, c, h, w = inputs.shape
+            inputs = inputs.view(-1, c, h, w)
+            if use_cuda:
+                inputs, targets = inputs.cuda(), targets.cuda()
+            outputs = net(inputs)
+            outputs_avg = outputs.view(bs, ncrops, -1).mean(1)  # avg over crops
+            loss = criterion(outputs_avg, targets)
+            PublicTest_loss += loss.item()
+            _, predicted = torch.max(outputs_avg.data, 1)
+            if batch_idx == 0:
+                predicted_labels = predicted.detach().cpu().numpy().reshape((-1, 1))
+                labels = targets.detach().cpu().numpy().reshape((-1, 1))
+            else:
+                predicted_labels = np.vstack((predicted_labels, predicted.detach().cpu().numpy().reshape((-1, 1))))
+                labels = np.vstack((labels, targets.detach().cpu().numpy().reshape((-1, 1))))
+            total += targets.size(0)
+            correct += predicted.eq(targets.data).cpu().sum().item()
+            description = 'Loss: %.3f | Acc: %.3f (%d/%d)'\
+                           % (PublicTest_loss / (batch_idx + 1), 100. * correct / total, correct, total)
+            pbar.set_description(desc=description)
+        cmatrix = confusion_matrix(labels, predicted_labels, labels=np.arange(7))
+        y_true_sum = cmatrix.sum(axis=1).clip(min=1e-12)
+        cmatrix_normalized = cmatrix / y_true_sum
+        mean_acc = cmatrix_normalized.diagonal().mean()
+        message = "Mean accuracy (fer2013_PublicTest): {}".format(mean_acc)
+        print(message)
     PublicTest_acc = 100.*correct/total
-    if PublicTest_acc > best_PublicTest_acc:
-        print('Saving..')
-        print("best_PublicTest_acc: %0.3f" % PublicTest_acc)
-        state = {
-            'net': net.state_dict() if use_cuda else net,
-            'acc': PublicTest_acc,
-            'epoch': epoch,
-        }
-        if not os.path.isdir(path):
-            os.mkdir(path)
-        torch.save(state, os.path.join(path,'PublicTest_model.t7'))
-        best_PublicTest_acc = PublicTest_acc
-        best_PublicTest_acc_epoch = epoch
+
 
 def PrivateTest(epoch):
     global PrivateTest_acc
@@ -175,47 +180,40 @@ def PrivateTest(epoch):
     PrivateTest_loss = 0
     correct = 0
     total = 0
-    for batch_idx, (inputs, targets) in enumerate(PrivateTestloader):
-        bs, ncrops, c, h, w = np.shape(inputs)
-        inputs = inputs.view(-1, c, h, w)
-        if use_cuda:
-            inputs, targets = inputs.cuda(), targets.cuda()
-        inputs, targets = Variable(inputs, volatile=True), Variable(targets)
-        outputs = net(inputs)
-        outputs_avg = outputs.view(bs, ncrops, -1).mean(1)  # avg over crops
-        loss = criterion(outputs_avg, targets)
-        PrivateTest_loss += loss.data[0]
-        _, predicted = torch.max(outputs_avg.data, 1)
-        total += targets.size(0)
-        correct += predicted.eq(targets.data).cpu().sum()
-
-        utils.progress_bar(batch_idx, len(PublicTestloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
-            % (PrivateTest_loss / (batch_idx + 1), 100. * correct / total, correct, total))
-    # Save checkpoint.
+    predicted_labels, labels = None, None
+    pbar = tqdm(PrivateTestloader, ncols=0)
+    with torch.no_grad():
+        for batch_idx, (inputs, targets) in enumerate(pbar):
+            bs, ncrops, c, h, w = np.shape(inputs)
+            inputs = inputs.view(-1, c, h, w)
+            if use_cuda:
+                inputs, targets = inputs.cuda(), targets.cuda()
+            outputs = net(inputs)
+            outputs_avg = outputs.view(bs, ncrops, -1).mean(1)  # avg over crops
+            loss = criterion(outputs_avg, targets)
+            PrivateTest_loss += loss.item()
+            _, predicted = torch.max(outputs_avg.data, 1)
+            if batch_idx == 0:
+                predicted_labels = predicted.detach().cpu().numpy().reshape((-1, 1))
+                labels = targets.detach().cpu().numpy().reshape((-1, 1))
+            else:
+                predicted_labels = np.vstack((predicted_labels, predicted.detach().cpu().numpy().reshape((-1, 1))))
+                labels = np.vstack((labels, targets.detach().cpu().numpy().reshape((-1, 1))))
+            total += targets.size(0)
+            correct += predicted.eq(targets.data).cpu().sum()
+            description = 'Loss: %.3f | Acc: %.3f (%d/%d)' \
+                          % (PrivateTest_loss / (batch_idx + 1), 100. * correct / total, correct, total)
+            pbar.set_description(desc=description)
+        cmatrix = confusion_matrix(labels, predicted_labels, labels=np.arange(7))
+        y_true_sum = cmatrix.sum(axis=1).clip(min=1e-12)
+        cmatrix_normalized = cmatrix / y_true_sum
+        mean_acc = cmatrix_normalized.diagonal().mean()
+        message = "Mean accuracy (fer2013_PrivateTest): {}".format(mean_acc)
+        print(message)
     PrivateTest_acc = 100.*correct/total
 
-    if PrivateTest_acc > best_PrivateTest_acc:
-        print('Saving..')
-        print("best_PrivateTest_acc: %0.3f" % PrivateTest_acc)
-        state = {
-            'net': net.state_dict() if use_cuda else net,
-	        'best_PublicTest_acc': best_PublicTest_acc,
-            'best_PrivateTest_acc': PrivateTest_acc,
-    	    'best_PublicTest_acc_epoch': best_PublicTest_acc_epoch,
-            'best_PrivateTest_acc_epoch': epoch,
-        }
-        if not os.path.isdir(path):
-            os.mkdir(path)
-        torch.save(state, os.path.join(path,'PrivateTest_model.t7'))
-        best_PrivateTest_acc = PrivateTest_acc
-        best_PrivateTest_acc_epoch = epoch
 
 for epoch in range(start_epoch, total_epoch):
     train(epoch)
     PublicTest(epoch)
     PrivateTest(epoch)
-
-print("best_PublicTest_acc: %0.3f" % best_PublicTest_acc)
-print("best_PublicTest_acc_epoch: %d" % best_PublicTest_acc_epoch)
-print("best_PrivateTest_acc: %0.3f" % best_PrivateTest_acc)
-print("best_PrivateTest_acc_epoch: %d" % best_PrivateTest_acc_epoch)
